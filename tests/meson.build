@@ -63,6 +63,7 @@ testnames = {
     'OptionGroupTest': {},
     'ExtraValidatorsTest': {},
     'EncodingTest': {},
+    'SensitiveTest': {},
     'WindowsTest': {'dependencies': host_machine.system() == 'windows' ? declare_dependency() : disabler()},
     # multi-only
     'TimerTest': {},

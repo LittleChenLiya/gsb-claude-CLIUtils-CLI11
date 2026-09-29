@@ -133,5 +133,6 @@ cc_test(
         "ExtraValidatorsTest",
         "localeTest",
         "EncodingTest",
+        "SensitiveTest",
     ]
 ]

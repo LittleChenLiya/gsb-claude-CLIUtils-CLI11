@@ -9,6 +9,7 @@
 // IWYU pragma: private, include "CLI/CLI.hpp"
 
 // [CLI11:public_includes:set]
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,53 @@
 
 namespace CLI {
 // [CLI11:error_hpp:verbatim]
+
+/// The placeholder substituted for sensitive (e.g. password or access token) values
+inline const std::string &sensitive_placeholder() {
+    static const std::string placeholder{"[redacted]"};
+    return placeholder;
+}
+
+/// Replace the bytes covered by the given (offset, size) ranges with the sensitive placeholder.
+/// Overlapping ranges are merged; ranges are clipped to the message length. No global text
+/// replacement is performed, so identical text in ordinary arguments is left untouched.
+inline std::string apply_sensitive_ranges(const std::string &message,
+                                          std::vector<std::pair<std::size_t, std::size_t>> ranges) {
+    for(auto &range : ranges) {
+        if(range.first >= message.size()) {
+            range.first = message.size();
+            range.second = 0;
+        } else if(range.second > message.size() - range.first) {
+            range.second = message.size() - range.first;
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const std::pair<std::size_t, std::size_t> &lhs,
+                                               const std::pair<std::size_t, std::size_t> &rhs) {
+        return lhs.first < rhs.first;
+    });
+    if(ranges.empty()) {
+        return message;
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> merged;
+    for(const auto &range : ranges) {
+        if(range.second == 0)
+            continue;
+        if(merged.empty() || range.first > merged.back().first + merged.back().second) {
+            merged.push_back(range);
+        } else if(range.first + range.second > merged.back().first + merged.back().second) {
+            merged.back().second = range.first + range.second - merged.back().first;
+        }
+    }
+    std::string result;
+    std::size_t pos = 0;
+    for(const auto &range : merged) {
+        result.append(message, pos, range.first - pos);
+        result += sensitive_placeholder();
+        pos = range.first + range.second;
+    }
+    result.append(message, pos, std::string::npos);
+    return result;
+}
 
 // Use one of these on all error classes.
 // These are temporary and are undef'd at the end of this file.
@@ -73,11 +121,48 @@ enum class ExitCodes : int {
 class Error : public std::runtime_error {
     int actual_exit_code;
     std::string error_name{"Error"};
+    /// Byte ranges of the error message that contain sensitive values and must be redacted
+    std::vector<std::pair<std::size_t, std::size_t>> sensitive_ranges_{};
 
   public:
     CLI11_NODISCARD int get_exit_code() const { return actual_exit_code; }
 
     CLI11_NODISCARD std::string get_name() const { return error_name; }
+
+    /// Mark a byte range [offset, offset+length) of the message as sensitive. The range is
+    /// clipped to the message length. This does not alter what(); use display_message().
+    void add_sensitive_range(std::size_t offset, std::size_t length) {
+        std::size_t message_size = std::char_traits<char>::length(what());
+        if(offset < message_size) {
+            if(length > message_size - offset) {
+                length = message_size - offset;
+            }
+            sensitive_ranges_.emplace_back(offset, length);
+        }
+    }
+
+    /// Mark every occurrence of token within the message as sensitive. Used when a validator
+    /// embeds the offending input in its error message.
+    void add_sensitive_token(const std::string &token) {
+        if(token.empty()) {
+            return;
+        }
+        std::string message = what();
+        std::size_t pos = message.find(token);
+        while(pos != std::string::npos) {
+            sensitive_ranges_.emplace_back(pos, token.size());
+            pos = message.find(token, pos + token.size());
+        }
+    }
+
+    /// True if the message contains ranges that must be redacted
+    CLI11_NODISCARD bool has_sensitive_content() const { return !sensitive_ranges_.empty(); }
+
+    /// The error message with every marked sensitive range replaced by the redaction placeholder.
+    /// what() keeps the original, unredacted message.
+    CLI11_NODISCARD std::string display_message() const {
+        return apply_sensitive_ranges(std::string(what()), sensitive_ranges_);
+    }
 
     Error(std::string name, std::string msg, int exit_code = static_cast<int>(ExitCodes::BaseClass))
         : runtime_error(msg), actual_exit_code(exit_code), error_name(std::move(name)) {}
@@ -208,8 +293,17 @@ class ConversionError : public ParseError {
     CLI11_ERROR_SIMPLE(ConversionError)
     ConversionError(std::string member, std::string name)
         : ConversionError("The value " + member + " is not an allowed value for " + name) {}
-    ConversionError(std::string name, std::vector<std::string> results)
-        : ConversionError("Could not convert: " + name + " = " + detail::join(results)) {}
+    ConversionError(std::string name, std::vector<std::string> results, bool sensitive = false)
+        : ConversionError("Could not convert: " + name + " = " + detail::join(results)) {
+        if(sensitive) {
+            const std::string prefix{" = "};
+            std::size_t offset = std::string(what()).find(prefix);
+            if(offset != std::string::npos) {
+                offset += prefix.size();
+                add_sensitive_range(offset, std::char_traits<char>::length(what()) - offset);
+            }
+        }
+    }
     static ConversionError TooManyInputsFlag(std::string name) {
         return ConversionError(name + ": too many inputs for a flag");
     }

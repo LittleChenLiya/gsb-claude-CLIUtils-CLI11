@@ -37,6 +37,7 @@ template <typename CRTP> template <typename T> void OptionBase<CRTP>::copy_to(T 
     other->disable_flag_override(disable_flag_override_);
     other->delimiter(delimiter_);
     other->always_capture_default(always_capture_default_);
+    other->sensitive(sensitive_);
     other->multi_option_policy(multi_option_policy_);
     other->callback_priority(callback_priority_);
 }
@@ -373,7 +374,7 @@ CLI11_INLINE void Option::run_callback() {
             proc_results_.clear();
         }
         if(!local_result)
-            throw ConversionError(get_name(), results_);
+            throw ConversionError(get_name(), results_, sensitive_);
     }
 }
 
@@ -628,7 +629,13 @@ CLI11_INLINE void Option::_validate_results(results_t &res) const {
                 }
                 auto err_msg = _validate(result, (index >= 0) ? (index % type_size_max_) : index);
                 if(!err_msg.empty())
-                    throw ValidationError(get_name(), err_msg);
+                {
+                    ValidationError error(get_name(), err_msg);
+                    if(sensitive_) {
+                        error.add_sensitive_token(result);
+                    }
+                    throw error;
+                }
                 ++index;
             }
         } else {
@@ -643,7 +650,13 @@ CLI11_INLINE void Option::_validate_results(results_t &res) const {
                 auto err_msg = _validate(result, index);
                 ++index;
                 if(!err_msg.empty())
-                    throw ValidationError(get_name(), err_msg);
+                {
+                    ValidationError error(get_name(), err_msg);
+                    if(sensitive_) {
+                        error.add_sensitive_token(result);
+                    }
+                    throw error;
+                }
             }
         }
     }

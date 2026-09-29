@@ -2792,7 +2792,7 @@ CLI11_INLINE void retire_option(App &app, const std::string &option_name) { reti
 namespace FailureMessage {
 
 CLI11_INLINE std::string simple(const App *app, const Error &e) {
-    std::string header = std::string(e.what()) + "\n";
+    std::string header = e.display_message() + "\n";
     std::vector<std::string> names;
 
     // Collect names
@@ -2810,7 +2810,7 @@ CLI11_INLINE std::string simple(const App *app, const Error &e) {
 }
 
 CLI11_INLINE std::string help(const App *app, const Error &e) {
-    std::string header = std::string("ERROR: ") + e.get_name() + ": " + e.what() + "\n";
+    std::string header = std::string("ERROR: ") + e.get_name() + ": " + e.display_message() + "\n";
     header += app->help();
     return header;
 }

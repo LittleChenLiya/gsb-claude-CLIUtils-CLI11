@@ -95,6 +95,10 @@ template <typename CRTP> class OptionBase {
     /// Automatically capture default value
     bool always_capture_default_{false};
 
+    /// True if values for this option are sensitive (passwords, access tokens, ...) and must be
+    /// redacted from parse errors and help output
+    bool sensitive_{false};
+
     /// Policy for handling multiple arguments beyond the expected Max
     MultiOptionPolicy multi_option_policy_{MultiOptionPolicy::Throw};
 
@@ -130,6 +134,12 @@ template <typename CRTP> class OptionBase {
         return static_cast<CRTP *>(this);
     }
 
+    /// Mark this option as sensitive; its values are redacted from parse error messages and help
+    CRTP *sensitive(bool value = true) {
+        sensitive_ = value;
+        return static_cast<CRTP *>(this);
+    }
+
     // Getters
 
     /// Get the group of this option
@@ -155,6 +165,9 @@ template <typename CRTP> class OptionBase {
 
     /// Return true if this will automatically capture the default value for help printing
     CLI11_NODISCARD bool get_always_capture_default() const { return always_capture_default_; }
+
+    /// The status of sensitive
+    CLI11_NODISCARD bool get_sensitive() const { return sensitive_; }
 
     /// The status of the multi option policy
     CLI11_NODISCARD MultiOptionPolicy get_multi_option_policy() const { return multi_option_policy_; }
@@ -736,7 +749,7 @@ class Option : public OptionBase<Option> {
             retval = detail::lexical_conversion<T, T>(proc_results_, output);
         }
         if(!retval) {
-            throw ConversionError(get_name(), results_);
+            throw ConversionError(get_name(), results_, sensitive_);
         }
     }
 
@@ -809,8 +822,13 @@ class Option : public OptionBase<Option> {
             results_ = std::move(old_results);
             current_option_state_ = old_option_state;
 
-            throw ConversionError(
-                get_name(), std::string("given default value(\"") + val_str + "\") produces an error : " + err.what());
+            ConversionError error(
+                get_name(),
+                std::string("given default value(\"") + val_str + "\") produces an error : " + err.what());
+            if(sensitive_) {
+                error.add_sensitive_token(val_str);
+            }
+            throw error;
         } catch(const CLI::Error &) {
             results_ = std::move(old_results);
             current_option_state_ = old_option_state;
