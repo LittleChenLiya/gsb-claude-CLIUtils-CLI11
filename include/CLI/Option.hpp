@@ -89,6 +89,10 @@ template <typename CRTP> class OptionBase {
     /// Disable overriding flag values with '=value'
     bool disable_flag_override_{false};
 
+    /// Mark the option as holding a sensitive value (such as a password or access token);
+    /// the value is masked in error messages and help output
+    bool sensitive_{false};
+
     /// Specify a delimiter character for vector arguments
     char delimiter_{'\0'};
 
@@ -130,6 +134,13 @@ template <typename CRTP> class OptionBase {
         return static_cast<CRTP *>(this);
     }
 
+    /// Mark this option as sensitive (e.g. passwords or access tokens);
+    /// its values are masked in parse error messages and in help output
+    CRTP *sensitive(bool value = true) {
+        sensitive_ = value;
+        return static_cast<CRTP *>(this);
+    }
+
     // Getters
 
     /// Get the group of this option
@@ -155,6 +166,9 @@ template <typename CRTP> class OptionBase {
 
     /// Return true if this will automatically capture the default value for help printing
     CLI11_NODISCARD bool get_always_capture_default() const { return always_capture_default_; }
+
+    /// The status of the sensitive flag
+    CLI11_NODISCARD bool get_sensitive() const { return sensitive_; }
 
     /// The status of the multi option policy
     CLI11_NODISCARD MultiOptionPolicy get_multi_option_policy() const { return multi_option_policy_; }
@@ -736,7 +750,7 @@ class Option : public OptionBase<Option> {
             retval = detail::lexical_conversion<T, T>(proc_results_, output);
         }
         if(!retval) {
-            throw ConversionError(get_name(), results_);
+            throw ConversionError(get_name(), _masked_results(results_));
         }
     }
 
@@ -809,8 +823,10 @@ class Option : public OptionBase<Option> {
             results_ = std::move(old_results);
             current_option_state_ = old_option_state;
 
-            throw ConversionError(
-                get_name(), std::string("given default value(\"") + val_str + "\") produces an error : " + err.what());
+            throw ConversionError(get_name(),
+                                  std::string("given default value(\"") +
+                                      (sensitive_ ? detail::sensitive_mask() : val_str) +
+                                      "\") produces an error : " + err.what());
         } catch(const CLI::Error &) {
             results_ = std::move(old_results);
             current_option_state_ = old_option_state;
@@ -827,6 +843,13 @@ class Option : public OptionBase<Option> {
   private:
     /// Run the results through the Validators
     void _validate_results(results_t &res) const;
+
+    /// Get the results to display in an error message, with values masked if the option is sensitive
+    CLI11_NODISCARD results_t _masked_results(const results_t &res) const;
+
+    /// Mask the tokens of a sensitive option in a validator error message
+    CLI11_NODISCARD std::string
+    _mask_validation_message(std::string err_msg, const std::string &original_token, const std::string &token) const;
 
     /** reduce the results in accordance with the MultiOptionPolicy
     @param[out] out results are assigned to res if there if they are different

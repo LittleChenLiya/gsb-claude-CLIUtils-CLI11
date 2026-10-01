@@ -39,6 +39,7 @@ template <typename CRTP> template <typename T> void OptionBase<CRTP>::copy_to(T 
     other->always_capture_default(always_capture_default_);
     other->multi_option_policy(multi_option_policy_);
     other->callback_priority(callback_priority_);
+    other->sensitive(sensitive_);
 }
 
 CLI11_INLINE Option::Option(
@@ -373,8 +374,26 @@ CLI11_INLINE void Option::run_callback() {
             proc_results_.clear();
         }
         if(!local_result)
-            throw ConversionError(get_name(), results_);
+            throw ConversionError(get_name(), _masked_results(results_));
     }
+}
+
+CLI11_NODISCARD CLI11_INLINE results_t Option::_masked_results(const results_t &res) const {
+    if(!sensitive_) {
+        return res;
+    }
+    // mask each captured token individually so only the ranges belonging to this option are redacted
+    return results_t(res.size(), detail::sensitive_mask());
+}
+
+CLI11_NODISCARD CLI11_INLINE std::string Option::_mask_validation_message(std::string err_msg,
+                                                                          const std::string &original_token,
+                                                                          const std::string &token) const {
+    if(sensitive_) {
+        err_msg = detail::redact_sensitive(err_msg, original_token);
+        err_msg = detail::redact_sensitive(err_msg, token);
+    }
+    return err_msg;
 }
 
 CLI11_NODISCARD CLI11_INLINE const std::string &Option::matching_name(const Option &other) const {
@@ -626,9 +645,10 @@ CLI11_INLINE void Option::_validate_results(results_t &res) const {
                     index = 0;  // reset index for variable size chunks
                     continue;
                 }
+                const std::string original_token = (sensitive_) ? result : std::string{};
                 auto err_msg = _validate(result, (index >= 0) ? (index % type_size_max_) : index);
                 if(!err_msg.empty())
-                    throw ValidationError(get_name(), err_msg);
+                    throw ValidationError(get_name(), _mask_validation_message(err_msg, original_token, result));
                 ++index;
             }
         } else {
@@ -640,10 +660,11 @@ CLI11_INLINE void Option::_validate_results(results_t &res) const {
                 index = expected_max_ - static_cast<int>(res.size());
             }
             for(std::string &result : res) {
+                const std::string original_token = (sensitive_) ? result : std::string{};
                 auto err_msg = _validate(result, index);
                 ++index;
                 if(!err_msg.empty())
-                    throw ValidationError(get_name(), err_msg);
+                    throw ValidationError(get_name(), _mask_validation_message(err_msg, original_token, result));
             }
         }
     }

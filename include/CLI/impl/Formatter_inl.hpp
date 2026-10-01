@@ -452,7 +452,7 @@ CLI11_INLINE std::string Formatter::make_option_opts(const Option *opt) const {
             }
             if(enable_option_defaults_) {
                 if(!opt->get_default_str().empty())
-                    out << " [" << opt->get_default_str() << "] ";
+                    out << " [" << (opt->get_sensitive() ? detail::sensitive_mask() : opt->get_default_str()) << "] ";
             }
             if(opt->get_expected_max() == detail::expected_max_vector_size)
                 out << " ...";

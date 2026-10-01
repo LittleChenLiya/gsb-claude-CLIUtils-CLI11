@@ -195,6 +195,13 @@ CLI11_INLINE std::string get_group_separators();
 /// Find and replace a substring with another substring
 CLI11_INLINE std::string find_and_replace(std::string str, std::string from, std::string to);
 
+/// The placeholder text used to mask the values of sensitive options in error messages and help output
+CLI11_INLINE std::string sensitive_mask();
+
+/// Replace all occurrences of a sensitive token in a message with the sensitive mask.
+/// An empty token is a no-op and the message is returned unmodified.
+CLI11_INLINE std::string redact_sensitive(std::string message, const std::string &token);
+
 /// check if the flag definitions has possible false flags
 inline bool has_default_flag_values(const std::string &flags) {
     return (flags.find_first_of("{!") != std::string::npos);

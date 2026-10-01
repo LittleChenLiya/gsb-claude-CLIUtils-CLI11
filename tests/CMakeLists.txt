@@ -61,7 +61,8 @@ set(CLI11_TESTS
     localeTest
     OptionGroupTest
     ExtraValidatorsTest
-    EncodingTest)
+    EncodingTest
+    SensitiveTest)
 
 if(WIN32)
   list(APPEND CLI11_TESTS WindowsTest)

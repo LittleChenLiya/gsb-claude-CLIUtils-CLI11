@@ -164,6 +164,15 @@ CLI11_INLINE std::string find_and_replace(std::string str, std::string from, std
     return str;
 }
 
+CLI11_INLINE std::string sensitive_mask() { return "***"; }
+
+CLI11_INLINE std::string redact_sensitive(std::string message, const std::string &token) {
+    if(token.empty()) {
+        return message;
+    }
+    return find_and_replace(std::move(message), token, sensitive_mask());
+}
+
 CLI11_INLINE void remove_default_flag_values(std::string &flags) {
     auto loc = flags.find_first_of('{', 2);
     while(loc != std::string::npos) {

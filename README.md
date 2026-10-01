@@ -510,6 +510,12 @@ Before parsing, you can set the following options:
   `capture_default_str()` uses.
 - `->always_capture_default()`: Always run `capture_default_str()` when creating
   new options. Only useful on an App's `option_defaults`.
+- `->sensitive()`: Mark an option as holding a sensitive value, such as a
+  password or access token. The values captured by the option are masked (`***`)
+  in parse error messages (including conversion and validator errors) and the
+  default value is masked in the help output. Only the tokens belonging to the
+  sensitive option are masked; identical text belonging to other options is left
+  untouched. Also settable on an App's `option_defaults`.
 - `->default_str(string)`: Set the default string directly (NO VALIDATION OR
   CALLBACKS). This string will also be used as a default value if no arguments
   are passed and the value is requested.
