@@ -52,6 +52,67 @@ enum class MultiOptionPolicy : char {
     Reverse,    //!< take only the last Expected number of arguments in reverse order
 };
 
+/// Enumeration of the kinds of sources a parsed value can originate from
+enum class SourceKind : char {
+    Unknown,      //!< the source was not recorded (tracking disabled or value added manually)
+    CommandLine,  //!< the value came from command line tokens
+    Environment,  //!< the value came from an environment variable
+    ConfigFile,   //!< the value came from a configuration file entry
+};
+
+/// Provenance record for a single parsed value of an Option.
+/// Records are only generated when source tracking is enabled for the option
+/// (see OptionBase::track_source or App::track_sources).
+struct ValueSource {
+    /// the kind of source the value came from
+    SourceKind kind{SourceKind::Unknown};
+    /// the value as parsed; empty (and value_hidden set) for sensitive options
+    std::string value{};
+    /// true if the value was withheld because the option is sensitive
+    bool value_hidden{false};
+    /// [command line] 0-based index of the first token used for this value (program name excluded)
+    std::size_t token_begin{0};
+    /// [command line] one past the 0-based index of the last token used for this value
+    std::size_t token_end{0};
+    /// [environment] the name of the environment variable the value was read from
+    std::string env_name{};
+    /// [config] the configuration file the value was read from (empty for streams)
+    std::string file{};
+    /// [config] the dot separated section path the entry was found in (empty for the default section)
+    std::string section{};
+    /// [config] the 1-based line number of the entry in the configuration file (0 if unknown)
+    std::size_t line{0};
+    /// number of raw inputs merged into this record (greater than 1 for Join/Sum reductions)
+    std::size_t contributors{1};
+
+    /// make a record for a command line source covering tokens [begin, end)
+    static ValueSource command_line(std::size_t begin, std::size_t end) {
+        ValueSource src;
+        src.kind = SourceKind::CommandLine;
+        src.token_begin = begin;
+        src.token_end = end;
+        return src;
+    }
+    /// make a record for an environment variable source
+    static ValueSource environment(std::string name) {
+        ValueSource src;
+        src.kind = SourceKind::Environment;
+        src.env_name = std::move(name);
+        return src;
+    }
+    /// make a record for a configuration file source
+    static ValueSource config(std::string file_name, std::string section_name, std::size_t line_number) {
+        ValueSource src;
+        src.kind = SourceKind::ConfigFile;
+        src.file = std::move(file_name);
+        src.section = std::move(section_name);
+        src.line = line_number;
+        return src;
+    }
+    /// a human readable description of the source; never prints the value of a sensitive option
+    CLI11_NODISCARD std::string describe(bool with_value = true) const;
+};
+
 /// @brief  enumeration for the callback priority
 enum class CallbackPriority : std::uint8_t {
     FirstPreHelp = 0,
@@ -100,6 +161,14 @@ template <typename CRTP> class OptionBase {
 
     /// Priority of callback
     CallbackPriority callback_priority_{CallbackPriority::Normal};
+
+    /// Enable recording of the source (command line tokens, environment variable, or config file location)
+    /// of each parsed value
+    bool track_source_{false};
+
+    /// Mark the option as sensitive: source records keep only locations, and values are redacted from
+    /// error messages
+    bool sensitive_{false};
 
     /// Copy the contents to another similar class (one based on OptionBase)
     template <typename T> void copy_to(T *other) const;
@@ -161,6 +230,26 @@ template <typename CRTP> class OptionBase {
 
     /// The priority of callback
     CLI11_NODISCARD CallbackPriority get_callback_priority() const { return callback_priority_; }
+
+    /// Enable or disable recording of the source of each parsed value
+    /// (command line token range, environment variable name, or config file section and line)
+    CRTP *track_source(bool value = true) {
+        track_source_ = value;
+        return static_cast<CRTP *>(this);
+    }
+
+    /// The status of source tracking
+    CLI11_NODISCARD bool get_track_source() const { return track_source_; }
+
+    /// Mark the option as sensitive: source records keep only locations (no values) and values are
+    /// redacted from error messages
+    CRTP *sensitive(bool value = true) {
+        sensitive_ = value;
+        return static_cast<CRTP *>(this);
+    }
+
+    /// The status of the sensitive flag
+    CLI11_NODISCARD bool get_sensitive() const { return sensitive_; }
 
     // Shortcuts for multi option policy
 
@@ -348,6 +437,15 @@ class Option : public OptionBase<Option> {
     results_t results_{};
     /// results after reduction
     mutable results_t proc_results_{};
+    /// provenance records aligned with results_ (only populated when track_source_ is enabled)
+    std::vector<ValueSource> sources_{};
+    /// provenance records for inputs that were overridden by a higher priority source
+    /// (command line > environment > config file)
+    std::vector<ValueSource> overridden_sources_{};
+    /// source to attach to subsequently added results (set by App during parsing)
+    ValueSource pending_source_{};
+    /// whether pending_source_ should be attached to subsequently added results
+    bool pending_source_set_{false};
     /// enumeration for the option state machine
     enum class option_state : char {
         parsing = 0,       //!< The option is currently collecting parsed results
@@ -699,6 +797,22 @@ class Option : public OptionBase<Option> {
     /// Get a copy of the results
     CLI11_NODISCARD results_t reduced_results() const;
 
+    /// Get the provenance records aligned with results() (empty unless source tracking is enabled)
+    CLI11_NODISCARD const std::vector<ValueSource> &sources() const { return sources_; }
+
+    /// Get the provenance records aligned with reduced_results(), reduced with the same MultiOptionPolicy
+    /// (empty unless source tracking is enabled)
+    CLI11_NODISCARD std::vector<ValueSource> reduced_sources() const;
+
+    /// Get the provenance records for inputs that were overridden by a higher priority source
+    CLI11_NODISCARD const std::vector<ValueSource> &overridden_sources() const { return overridden_sources_; }
+
+    /// Set the source to attach to subsequently added results (used by App during parsing)
+    void _set_pending_source(ValueSource source);
+
+    /// Record an input that was overridden by a higher priority source
+    void _record_overridden(ValueSource source);
+
     /// Get the results as a specified type
     template <typename T> void results(T &output) const {
         bool retval = false;
@@ -736,6 +850,10 @@ class Option : public OptionBase<Option> {
             retval = detail::lexical_conversion<T, T>(proc_results_, output);
         }
         if(!retval) {
+            if(sensitive_) {
+                // do not leak sensitive values in the error message
+                throw ConversionError(get_name(), results_t(results_.size(), std::string{"<redacted>"}));
+            }
             throw ConversionError(get_name(), results_);
         }
     }
@@ -793,6 +911,7 @@ class Option : public OptionBase<Option> {
         std::string val_str = detail::value_string(val);
         auto old_option_state = current_option_state_;
         results_t old_results{std::move(results_)};
+        std::vector<ValueSource> old_sources{std::move(sources_)};
         results_.clear();
         try {
             add_result(val_str);
@@ -807,16 +926,20 @@ class Option : public OptionBase<Option> {
         } catch(const ConversionError &err) {
             // this should be done
             results_ = std::move(old_results);
+            sources_ = std::move(old_sources);
             current_option_state_ = old_option_state;
 
             throw ConversionError(
                 get_name(), std::string("given default value(\"") + val_str + "\") produces an error : " + err.what());
         } catch(const CLI::Error &) {
             results_ = std::move(old_results);
+            sources_ = std::move(old_sources);
             current_option_state_ = old_option_state;
             throw;
         }
         results_ = std::move(old_results);
+        sources_ = std::move(old_sources);
+        pending_source_set_ = false;
         default_str_ = std::move(val_str);
         return this;
     }
@@ -832,6 +955,12 @@ class Option : public OptionBase<Option> {
     @param[out] out results are assigned to res if there if they are different
     */
     void _reduce_results(results_t &out, const results_t &original) const;
+
+    /// record provenance for the results appended since previous_size (aligned with results_)
+    void _record_sources(std::size_t previous_size);
+
+    /// merge the source records in [first, last) into a single record (used for Join/Sum reductions)
+    CLI11_NODISCARD ValueSource _merge_sources(std::size_t first, std::size_t last) const;
 
     // Run a result through the Validators
     std::string _validate(std::string &result, int index) const;

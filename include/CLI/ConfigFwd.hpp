@@ -9,6 +9,7 @@
 // IWYU pragma: private, include "CLI/CLI.hpp"
 
 // [CLI11:public_includes:set]
+#include <cstddef>
 #include <cstdint>
 #include <iosfwd>
 #include <string>
@@ -36,6 +37,10 @@ struct ConfigItem {
     std::vector<std::string> inputs{};
     /// @brief indicator if a multiline vector separator was inserted
     bool multiline{false};
+    /// 1-based line number in the configuration file or stream this item was read from (0 if unknown)
+    std::size_t line{0};
+    /// name of the configuration file this item was read from (empty for streams)
+    std::string source{};
     /// The list of parents and name joined by "."
     CLI11_NODISCARD std::string fullname() const;
 };

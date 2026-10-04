@@ -62,7 +62,11 @@ CLI11_INLINE std::vector<ConfigItem> Config::from_file(const std::string &name) 
     if(!input.good())
         throw FileError::Missing(name);
 
-    return from_config(input);
+    auto items = from_config(input);
+    for(auto &item : items) {
+        item.source = name;
+    }
+    return items;
 }
 
 static constexpr auto multiline_literal_quote = R"(''')";
@@ -314,9 +318,11 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
     char aEnd = (isINIArray) ? ']' : arrayEnd;
     char aSep = (isINIArray && arraySeparator == ' ') ? ',' : arraySeparator;
     int currentSectionIndex{0};
+    std::size_t line_number{0};
 
     std::string line_sep_chars{parentSeparatorChar, commentChar, valueDelimiter};
     while(getline(input, buffer)) {
+        ++line_number;
         std::vector<std::string> items_buffer;
         std::string name;
         line = detail::trim_copy(buffer);
@@ -335,6 +341,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
             auto cchar = line.front();
             while(inMLineComment) {
                 if(getline(input, line)) {
+                    ++line_number;
                     detail::trim(line);
                 } else {
                     break;
@@ -464,6 +471,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
                     if(!std::getline(input, l2)) {
                         break;
                     }
+                    ++line_number;
                     line = l2;
                     detail::rtrim(line);
                     if(detail::hasMLString(line, keyChar)) {
@@ -506,6 +514,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
                 items_buffer = {item};
             } else if(!item.empty() && item.front() == aStart) {
                 for(std::string multiline; item.back() != aEnd && std::getline(input, multiline);) {
+                    ++line_number;
                     detail::trim(multiline);
                     item += multiline;
                 }
@@ -566,6 +575,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
             output.back().parents = std::move(parents);
             output.back().name = std::move(name);
             output.back().inputs = std::move(items_buffer);
+            output.back().line = line_number;
         }
     }
     if(currentSection != "default") {

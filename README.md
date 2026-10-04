@@ -448,6 +448,17 @@ Before parsing, you can set the following options:
 - `->envname(name)`: Gets the value from the environment if present and not
   passed on the command line. The value must also pass any validators to be
   used.
+- `->track_source(true/false)`: Enable recording of the source of each parsed
+  value: the command line token range, the environment variable name, or the
+  config file, section, and line number. Records for the values kept after the
+  `MultiOptionPolicy` reduction are available through `reduced_sources()`, all
+  records through `sources()`, and inputs overridden by a higher priority
+  source (command line > config file > environment) through
+  `overridden_sources()`. Can also be set on an App's `option_defaults` or for
+  a whole App (including subcommands) with `app.track_sources()`.
+- `->sensitive(true/false)`: Mark the option as sensitive. Source records for
+  sensitive options keep only locations (no values), and values are redacted
+  from validation and conversion error messages.
 - `->group(name)`: The help group to put the option in. No effect for positional
   options. Defaults to `"Options"`. Options given an empty string will not show
   up in the help print (hidden).

@@ -39,6 +39,43 @@ template <typename CRTP> template <typename T> void OptionBase<CRTP>::copy_to(T 
     other->always_capture_default(always_capture_default_);
     other->multi_option_policy(multi_option_policy_);
     other->callback_priority(callback_priority_);
+    other->track_source(track_source_);
+    other->sensitive(sensitive_);
+}
+
+CLI11_NODISCARD CLI11_INLINE std::string ValueSource::describe(bool with_value) const {
+    std::string out;
+    switch(kind) {
+    case SourceKind::CommandLine:
+        out = "command line tokens [" + std::to_string(token_begin) + ", " + std::to_string(token_end) + ")";
+        break;
+    case SourceKind::Environment:
+        out = "environment variable '" + env_name + "'";
+        break;
+    case SourceKind::ConfigFile:
+        out = "config";
+        if(!file.empty()) {
+            out += " file '" + file + "'";
+        }
+        if(!section.empty()) {
+            out += " section '" + section + "'";
+        }
+        if(line != 0) {
+            out += " line " + std::to_string(line);
+        }
+        break;
+    case SourceKind::Unknown:
+    default:
+        out = "unknown source";
+        break;
+    }
+    if(contributors > 1) {
+        out += " (merged from " + std::to_string(contributors) + " inputs)";
+    }
+    if(with_value) {
+        out += (value_hidden) ? " : <value hidden>" : " : '" + value + "'";
+    }
+    return out;
 }
 
 CLI11_INLINE Option::Option(
@@ -50,6 +87,8 @@ CLI11_INLINE Option::Option(
 CLI11_INLINE void Option::clear() {
     results_.clear();
     proc_results_.clear();
+    sources_.clear();
+    overridden_sources_.clear();
     current_option_state_ = option_state::parsing;
 }
 
@@ -348,6 +387,7 @@ CLI11_INLINE void Option::run_callback() {
     bool used_default_str = false;
     if(force_callback_ && results_.empty()) {
         used_default_str = true;
+        pending_source_set_ = false;  // the default string does not come from a parsed source
         add_result(default_str_);
     }
     if(current_option_state_ == option_state::parsing) {
@@ -371,9 +411,15 @@ CLI11_INLINE void Option::run_callback() {
             // otherwise the callback is the storage of the default
             results_.clear();
             proc_results_.clear();
+            sources_.clear();
         }
-        if(!local_result)
+        if(!local_result) {
+            if(sensitive_) {
+                // do not leak sensitive values in the error message
+                throw ConversionError(get_name(), results_t(results_.size(), std::string{"<redacted>"}));
+            }
             throw ConversionError(get_name(), results_);
+        }
     }
 }
 
@@ -491,23 +537,170 @@ CLI11_NODISCARD CLI11_INLINE std::string Option::get_flag_value(const std::strin
 }
 
 CLI11_INLINE Option *Option::add_result(std::string s) {
+    const std::size_t previous_size = results_.size();
     _add_result(std::move(s), results_);
     current_option_state_ = option_state::parsing;
+    _record_sources(previous_size);
     return this;
 }
 
 CLI11_INLINE Option *Option::add_result(std::string s, int &results_added) {
+    const std::size_t previous_size = results_.size();
     results_added = _add_result(std::move(s), results_);
     current_option_state_ = option_state::parsing;
+    _record_sources(previous_size);
     return this;
 }
 
 CLI11_INLINE Option *Option::add_result(std::vector<std::string> s) {
+    const std::size_t previous_size = results_.size();
     current_option_state_ = option_state::parsing;
     for(auto &str : s) {
         _add_result(std::move(str), results_);
     }
+    _record_sources(previous_size);
     return this;
+}
+
+CLI11_INLINE void Option::_set_pending_source(ValueSource source) {
+    if(!track_source_) {
+        pending_source_set_ = false;
+        return;
+    }
+    if(sensitive_) {
+        source.value.clear();
+        source.value_hidden = true;
+    }
+    pending_source_ = std::move(source);
+    pending_source_set_ = true;
+}
+
+CLI11_INLINE void Option::_record_overridden(ValueSource source) {
+    if(!track_source_) {
+        return;
+    }
+    if(sensitive_) {
+        source.value.clear();
+        source.value_hidden = true;
+    }
+    overridden_sources_.push_back(std::move(source));
+}
+
+CLI11_INLINE void Option::_record_sources(std::size_t previous_size) {
+    if(!track_source_) {
+        return;
+    }
+    // keep the records aligned with results_ even if tracking was enabled after some results were added
+    while(sources_.size() < previous_size) {
+        sources_.emplace_back();
+    }
+    ValueSource src = pending_source_set_ ? pending_source_ : ValueSource{};
+    src.value_hidden = sensitive_;
+    for(std::size_t ii = previous_size; ii < results_.size(); ++ii) {
+        if(!sensitive_) {
+            src.value = results_[ii];
+        }
+        sources_.push_back(src);
+    }
+}
+
+CLI11_NODISCARD CLI11_INLINE ValueSource Option::_merge_sources(std::size_t first, std::size_t last) const {
+    ValueSource merged;
+    merged.contributors = last - first;
+    merged.value_hidden = sensitive_;
+    bool common_kind_set{false};
+    SourceKind common_kind{SourceKind::Unknown};
+    bool first_token{true};
+    for(std::size_t ii = first; ii < last; ++ii) {
+        const ValueSource &src = sources_[ii];
+        if(!common_kind_set) {
+            common_kind = src.kind;
+            common_kind_set = true;
+        } else if(common_kind != src.kind) {
+            common_kind = SourceKind::Unknown;
+        }
+        if(src.kind == SourceKind::CommandLine) {
+            if(first_token) {
+                merged.token_begin = src.token_begin;
+                merged.token_end = src.token_end;
+                first_token = false;
+            } else {
+                merged.token_begin = (std::min)(merged.token_begin, src.token_begin);
+                merged.token_end = (std::max)(merged.token_end, src.token_end);
+            }
+        }
+        if(merged.env_name.empty()) {
+            merged.env_name = src.env_name;
+        }
+        if(merged.file.empty()) {
+            merged.file = src.file;
+        }
+        if(merged.section.empty()) {
+            merged.section = src.section;
+        }
+        if(merged.line == 0) {
+            merged.line = src.line;
+        }
+    }
+    merged.kind = common_kind;
+    if(!sensitive_) {
+        // combine the raw values the same way _reduce_results does
+        results_t subset(results_.begin() + static_cast<results_t::difference_type>(first),
+                         results_.begin() + static_cast<results_t::difference_type>(last));
+        merged.value = (multi_option_policy_ == MultiOptionPolicy::Sum)
+                           ? detail::sum_string_vector(subset)
+                           : detail::join(subset, std::string(1, (delimiter_ == '\0') ? '\n' : delimiter_));
+    }
+    return merged;
+}
+
+CLI11_NODISCARD CLI11_INLINE std::vector<ValueSource> Option::reduced_sources() const {
+    std::vector<ValueSource> out;
+    const std::size_t n = (std::min)(results_.size(), sources_.size());
+    if(n == 0) {
+        return out;
+    }
+    auto at = [this](std::size_t index) -> ValueSource {
+        return (index < sources_.size()) ? sources_[index] : ValueSource{};
+    };
+    const std::size_t trim_size = std::min<std::size_t>(
+        static_cast<std::size_t>((std::max)(get_items_expected_max(), 1)), n);
+    switch(multi_option_policy_) {
+    case MultiOptionPolicy::TakeLast:
+        for(std::size_t ii = n - trim_size; ii < n; ++ii) {
+            out.push_back(at(ii));
+        }
+        break;
+    case MultiOptionPolicy::Reverse:
+        for(std::size_t ii = n - trim_size; ii < n; ++ii) {
+            out.push_back(at(ii));
+        }
+        std::reverse(out.begin(), out.end());
+        break;
+    case MultiOptionPolicy::TakeFirst:
+        for(std::size_t ii = 0; ii < trim_size; ++ii) {
+            out.push_back(at(ii));
+        }
+        break;
+    case MultiOptionPolicy::Join:
+        if(n > 1) {
+            out.push_back(_merge_sources(0, n));
+        } else {
+            out.push_back(at(0));
+        }
+        break;
+    case MultiOptionPolicy::Sum:
+        out.push_back(_merge_sources(0, n));
+        break;
+    case MultiOptionPolicy::TakeAll:
+    case MultiOptionPolicy::Throw:
+    default:
+        for(std::size_t ii = 0; ii < n; ++ii) {
+            out.push_back(at(ii));
+        }
+        break;
+    }
+    return out;
 }
 
 CLI11_NODISCARD CLI11_INLINE results_t Option::reduced_results() const {
@@ -734,6 +927,7 @@ CLI11_INLINE std::string Option::_validate(std::string &result, int index) const
         // an empty with nothing expected is allowed
         return err_msg;
     }
+    const std::string original_value = result;
     for(const auto &vali : validators_) {
         auto v = vali->get_application_index();
         if(v == -1 || v == index) {
@@ -744,6 +938,22 @@ CLI11_INLINE std::string Option::_validate(std::string &result, int index) const
             }
             if(!err_msg.empty())
                 break;
+        }
+    }
+
+    if(sensitive_ && !err_msg.empty()) {
+        // redact the sensitive value from the error message
+        const std::string *const secrets[] = {&result, &original_value};
+        for(const std::string *secret : secrets) {
+            if(secret->empty()) {
+                continue;
+            }
+            const std::string replacement{"<redacted>"};
+            std::string::size_type pos = 0;
+            while((pos = err_msg.find(*secret, pos)) != std::string::npos) {
+                err_msg.replace(pos, secret->size(), replacement);
+                pos += replacement.size();
+            }
         }
     }
 

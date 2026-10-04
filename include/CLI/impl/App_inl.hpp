@@ -1371,6 +1371,30 @@ CLI11_NODISCARD CLI11_INLINE detail::Classifier App::_recognize(const std::strin
     return detail::Classifier::NONE;
 }
 
+CLI11_INLINE App *App::track_sources(bool value) {
+    option_defaults_.track_source(value);
+    for(const Option_p &opt : options_) {
+        opt->track_source(value);
+    }
+    for(const App_p &sub : subcommands_) {
+        sub->track_sources(value);
+    }
+    return this;
+}
+
+CLI11_NODISCARD CLI11_INLINE std::size_t App::_token_index(const std::vector<std::string> &args) const {
+    const App *root = this;
+    while(root->parent_ != nullptr) {
+        root = root->parent_;
+    }
+    std::size_t total = root->parse_args_total_;
+    if(total < args.size()) {
+        // fallback if the top level parse did not record the total (e.g. parsing a subcommand directly)
+        total = args.size();
+    }
+    return total - args.size();
+}
+
 CLI11_INLINE bool App::_process_config_file(const std::string &config_file, bool throw_error) {
     auto path_result = detail::check_path(config_file.c_str());
     if(path_result == detail::path_type::file) {
@@ -1429,13 +1453,22 @@ CLI11_INLINE void App::_process_config_file() {
 
 CLI11_INLINE void App::_process_env() {
     for(const Option_p &opt : options_) {
-        if(opt->count() == 0 && !opt->envname_.empty()) {
+        if(!opt->envname_.empty()) {
             std::string ename_string = detail::get_environment_value(opt->envname_);
             if(!ename_string.empty()) {
-                std::string result = ename_string;
-                result = opt->_validate(result, 0);
-                if(result.empty()) {
-                    opt->add_result(ename_string);
+                if(opt->count() == 0) {
+                    std::string result = ename_string;
+                    result = opt->_validate(result, 0);
+                    if(result.empty()) {
+                        opt->_set_pending_source(ValueSource::environment(opt->envname_));
+                        opt->add_result(ename_string);
+                    }
+                } else {
+                    // the option already has a value from a higher priority source (command line);
+                    // record the overridden environment input if source tracking is enabled
+                    ValueSource src = ValueSource::environment(opt->envname_);
+                    src.value = ename_string;
+                    opt->_record_overridden(std::move(src));
                 }
             }
         }
@@ -1729,6 +1762,9 @@ CLI11_INLINE void App::_process_completion_callbacks(bool with_help_flags) {
 CLI11_INLINE void App::_parse(std::vector<std::string> &args) {
     increment_parsed();
     _trigger_pre_parse(args.size());
+    if(parent_ == nullptr) {
+        parse_args_total_ = args.size();
+    }
     bool positional_only = false;
 
     while(!args.empty()) {
@@ -1754,6 +1790,7 @@ CLI11_INLINE void App::_parse(std::vector<std::string> &&args) {
     // operation is simplified
     increment_parsed();
     _trigger_pre_parse(args.size());
+    parse_args_total_ = args.size();
     bool positional_only = false;
 
     while(!args.empty()) {
@@ -1916,6 +1953,7 @@ CLI11_INLINE bool App::_parse_single_config(const ConfigItem &item, std::size_t 
         throw ConfigError::NotConfigurable(item.fullname());
     }
     if(op->empty()) {
+        op->_set_pending_source(ValueSource::config(item.source, detail::join(item.parents, "."), item.line));
         std::vector<std::string> buffer;  // a buffer to use for copying and modifying inputs in a few cases
         bool useBuffer{false};
         if(item.multiline) {
@@ -1933,6 +1971,14 @@ CLI11_INLINE bool App::_parse_single_config(const ConfigItem &item, std::size_t 
         }
         op->add_result(inputs);
         op->run_callback();
+    } else {
+        // the option already has a value from a higher priority source (command line or environment);
+        // record the overridden config input if source tracking is enabled
+        for(const auto &input : item.inputs) {
+            ValueSource src = ValueSource::config(item.source, detail::join(item.parents, "."), item.line);
+            src.value = input;
+            op->_record_overridden(std::move(src));
+        }
     }
 
     return true;
@@ -2055,6 +2101,7 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
     }
     if(posOpt != nullptr) {
         parse_order_.push_back(posOpt);
+        posOpt->_set_pending_source(ValueSource::command_line(_token_index(args), _token_index(args) + 1));
         if(posOpt->get_inject_separator()) {
             if(!posOpt->results().empty() && !posOpt->results().back().empty()) {
                 posOpt->add_result(std::string{});
@@ -2224,6 +2271,7 @@ CLI11_INLINE bool
 App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type, bool local_processing_only) {
 
     std::string current = args.back();
+    const std::size_t option_token = _token_index(args);
 
     std::string arg_name;
     std::string value;
@@ -2387,6 +2435,7 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
 
     // Get a reference to the pointer to make syntax bearable
     Option_p &op = *op_ptr;
+    op->_set_pending_source(ValueSource::command_line(option_token, option_token + 1));
     /// if we require a separator add it here
     if(op->get_inject_separator()) {
         if(!op->results().empty() && !op->results().back().empty()) {
@@ -2427,7 +2476,9 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
     // gather the minimum number of arguments
     while(min_num > collected && !args.empty()) {
         std::string current_ = args.back();
+        const std::size_t value_token = _token_index(args);
         args.pop_back();
+        op->_set_pending_source(ValueSource::command_line(value_token, value_token + 1));
         op->add_result(current_, result_count);
         parse_order_.push_back(op.get());
         collected += result_count;
@@ -2454,6 +2505,7 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
                     break;
                 }
             }
+            op->_set_pending_source(ValueSource::command_line(_token_index(args), _token_index(args) + 1));
             op->add_result(args.back(), result_count);
             parse_order_.push_back(op.get());
             args.pop_back();

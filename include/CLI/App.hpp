@@ -218,6 +218,9 @@ class App {
     /// This is a list of pointers to options with the original parse order
     std::vector<Option *> parse_order_{};
 
+    /// The total number of tokens in the current top level command line parse (used for source tracking)
+    std::size_t parse_args_total_{0};
+
     /// This is a list of the subcommands collected, in order
     std::vector<App *> parsed_subcommands_{};
 
@@ -530,6 +533,11 @@ class App {
 
     /// Get the OptionDefault object, to set option defaults
     OptionDefaults *option_defaults() { return &option_defaults_; }
+
+    /// Enable or disable source tracking (recording of the command line token range, environment variable
+    /// name, or config file section and line for each parsed value) for this app, all its current options,
+    /// all subcommands recursively, and (via the option defaults) all options added later
+    App *track_sources(bool value = true);
 
     ///@}
     /// @name Adding options
@@ -1337,6 +1345,10 @@ class App {
 
     /// Trigger the pre_parse callback if needed
     void _trigger_pre_parse(std::size_t remaining_args);
+
+    /// Get the 0-based index (in the original command line, program name excluded) of the token currently at
+    /// the back of the (reversed) args vector; used for source tracking
+    CLI11_NODISCARD std::size_t _token_index(const std::vector<std::string> &args) const;
 
     /// Get the appropriate parent to fallthrough to which is the first one that has a name or the main app
     CLI11_NODISCARD App *_get_fallthrough_parent() noexcept;

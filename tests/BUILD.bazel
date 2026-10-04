@@ -131,6 +131,7 @@ cc_test(
         "TrueFalseTest",
         "OptionGroupTest",
         "ExtraValidatorsTest",
+        "SourceTrackingTest",
         "localeTest",
         "EncodingTest",
     ]

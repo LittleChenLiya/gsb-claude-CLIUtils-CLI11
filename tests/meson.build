@@ -62,6 +62,7 @@ testnames = {
     'localeTest': {},
     'OptionGroupTest': {},
     'ExtraValidatorsTest': {},
+    'SourceTrackingTest': {},
     'EncodingTest': {},
     'WindowsTest': {'dependencies': host_machine.system() == 'windows' ? declare_dependency() : disabler()},
     # multi-only
