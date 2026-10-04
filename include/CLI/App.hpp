@@ -1284,10 +1284,10 @@ class App {
     void _parse_setup();
 
     /// Internal parse function
-    void _parse(std::vector<std::string> &args);
+    void _parse(std::vector<std::string> &args, std::vector<std::size_t> &tokens);
 
     /// Internal parse function
-    void _parse(std::vector<std::string> &&args);
+    void _parse(std::vector<std::string> &&args, std::vector<std::size_t> &tokens);
 
     /// Internal function to parse a stream
     void _parse_stream(std::istream &input);
@@ -1296,17 +1296,20 @@ class App {
     ///
     /// If this has more than one dot.separated.name, go into the subcommand matching it
     /// Returns true if it managed to find the option, if false you'll need to remove the arg manually.
-    void _parse_config(const std::vector<ConfigItem> &args);
+    void _parse_config(const std::vector<ConfigItem> &args, const std::string &config_file = std::string{});
 
     /// Fill in a single config option
-    bool _parse_single_config(const ConfigItem &item, std::size_t level = 0);
+    bool _parse_single_config(const ConfigItem &item, std::size_t level, const std::string &config_file);
 
     /// @brief store the results for a flag like option
-    bool _add_flag_like_result(Option *op, const ConfigItem &item, const std::vector<std::string> &inputs);
+    bool _add_flag_like_result(Option *op,
+                               const ConfigItem &item,
+                               const std::vector<std::string> &inputs,
+                               const ParseSource &src);
 
     /// Parse "one" argument (some may eat more than one), delegate to parent if fails, add to missing if missing
     /// from main return false if the parse has failed and needs to return to parent
-    bool _parse_single(std::vector<std::string> &args, bool &positional_only);
+    bool _parse_single(std::vector<std::string> &args, std::vector<std::size_t> &tokens, bool &positional_only);
 
     /// Count the required remaining positional arguments
     CLI11_NODISCARD std::size_t _count_remaining_positionals(bool required_only = false) const;
@@ -1317,7 +1320,9 @@ class App {
     /// Parse a positional, go up the tree to check
     /// @param haltOnSubcommand if set to true the operation will not process subcommands merely return false
     /// Return true if the positional was used false otherwise
-    bool _parse_positional(std::vector<std::string> &args, bool haltOnSubcommand);
+    bool _parse_positional(std::vector<std::string> &args,
+                           std::vector<std::size_t> &tokens,
+                           bool haltOnSubcommand);
 
     /// Locate a subcommand by name with two conditions, should disabled subcommands be ignored, and should used
     /// subcommands be ignored
@@ -1328,12 +1333,15 @@ class App {
     ///
     /// Unlike the others, this one will always allow fallthrough
     /// return true if the subcommand was processed false otherwise
-    bool _parse_subcommand(std::vector<std::string> &args);
+    bool _parse_subcommand(std::vector<std::string> &args, std::vector<std::size_t> &tokens);
 
     /// Parse a short (false) or long (true) argument, must be at the top of the list
     /// if local_processing_only is set to true then fallthrough is disabled will return false if not found
     /// return true if the argument was processed or false if nothing was done
-    bool _parse_arg(std::vector<std::string> &args, detail::Classifier current_type, bool local_processing_only);
+    bool _parse_arg(std::vector<std::string> &args,
+                    std::vector<std::size_t> &tokens,
+                    detail::Classifier current_type,
+                    bool local_processing_only);
 
     /// Trigger the pre_parse callback if needed
     void _trigger_pre_parse(std::size_t remaining_args);

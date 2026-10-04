@@ -36,6 +36,8 @@ struct ConfigItem {
     std::vector<std::string> inputs{};
     /// @brief indicator if a multiline vector separator was inserted
     bool multiline{false};
+    /// @brief the 1-based line number the item was found on (0 if unknown)
+    int line{0};
     /// The list of parents and name joined by "."
     CLI11_NODISCARD std::string fullname() const;
 };

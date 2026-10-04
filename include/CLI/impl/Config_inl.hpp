@@ -309,6 +309,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
     bool inSection{false};
     bool inMLineComment{false};
     bool inMLineValue{false};
+    int line_number{0};
 
     char aStart = (isINIArray) ? '[' : arrayStart;
     char aEnd = (isINIArray) ? ']' : arrayEnd;
@@ -317,6 +318,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
 
     std::string line_sep_chars{parentSeparatorChar, commentChar, valueDelimiter};
     while(getline(input, buffer)) {
+        ++line_number;
         std::vector<std::string> items_buffer;
         std::string name;
         line = detail::trim_copy(buffer);
@@ -566,6 +568,7 @@ CLI11_INLINE std::vector<ConfigItem> ConfigBase::from_config(std::istream &input
             output.back().parents = std::move(parents);
             output.back().name = std::move(name);
             output.back().inputs = std::move(items_buffer);
+            output.back().line = line_number;
         }
     }
     if(currentSection != "default") {

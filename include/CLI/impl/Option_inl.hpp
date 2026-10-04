@@ -39,6 +39,7 @@ template <typename CRTP> template <typename T> void OptionBase<CRTP>::copy_to(T 
     other->always_capture_default(always_capture_default_);
     other->multi_option_policy(multi_option_policy_);
     other->callback_priority(callback_priority_);
+    other->sensitive(sensitive_);
 }
 
 CLI11_INLINE Option::Option(
@@ -50,6 +51,8 @@ CLI11_INLINE Option::Option(
 CLI11_INLINE void Option::clear() {
     results_.clear();
     proc_results_.clear();
+    sources_.clear();
+    overridden_.clear();
     current_option_state_ = option_state::parsing;
 }
 
@@ -348,7 +351,7 @@ CLI11_INLINE void Option::run_callback() {
     bool used_default_str = false;
     if(force_callback_ && results_.empty()) {
         used_default_str = true;
-        add_result(default_str_);
+        add_result(default_str_, ParseSource{});
     }
     if(current_option_state_ == option_state::parsing) {
         _validate_results(results_);
@@ -371,6 +374,7 @@ CLI11_INLINE void Option::run_callback() {
             // otherwise the callback is the storage of the default
             results_.clear();
             proc_results_.clear();
+            sources_.clear();
         }
         if(!local_result)
             throw ConversionError(get_name(), results_);
@@ -491,13 +495,25 @@ CLI11_NODISCARD CLI11_INLINE std::string Option::get_flag_value(const std::strin
 }
 
 CLI11_INLINE Option *Option::add_result(std::string s) {
-    _add_result(std::move(s), results_);
+    _add_result(std::move(s), results_, sources_, ParseSource{});
+    current_option_state_ = option_state::parsing;
+    return this;
+}
+
+CLI11_INLINE Option *Option::add_result(std::string s, const ParseSource &src) {
+    _add_result(std::move(s), results_, sources_, src);
     current_option_state_ = option_state::parsing;
     return this;
 }
 
 CLI11_INLINE Option *Option::add_result(std::string s, int &results_added) {
-    results_added = _add_result(std::move(s), results_);
+    results_added = _add_result(std::move(s), results_, sources_, ParseSource{});
+    current_option_state_ = option_state::parsing;
+    return this;
+}
+
+CLI11_INLINE Option *Option::add_result(std::string s, int &results_added, const ParseSource &src) {
+    results_added = _add_result(std::move(s), results_, sources_, src);
     current_option_state_ = option_state::parsing;
     return this;
 }
@@ -505,7 +521,15 @@ CLI11_INLINE Option *Option::add_result(std::string s, int &results_added) {
 CLI11_INLINE Option *Option::add_result(std::vector<std::string> s) {
     current_option_state_ = option_state::parsing;
     for(auto &str : s) {
-        _add_result(std::move(str), results_);
+        _add_result(std::move(str), results_, sources_, ParseSource{});
+    }
+    return this;
+}
+
+CLI11_INLINE Option *Option::add_result(std::vector<std::string> s, const ParseSource &src) {
+    current_option_state_ = option_state::parsing;
+    for(auto &str : s) {
+        _add_result(std::move(str), results_, sources_, src);
     }
     return this;
 }
@@ -526,6 +550,108 @@ CLI11_NODISCARD CLI11_INLINE results_t Option::reduced_results() const {
         }
     }
     return res;
+}
+
+CLI11_NODISCARD CLI11_INLINE SourcedValue Option::_make_sourced_value(std::string value,
+                                                                       std::vector<ParseSource> srcs) const {
+    SourcedValue sv;
+    if(sensitive_) {
+        sv.value = "***";
+    } else {
+        sv.value = std::move(value);
+    }
+    sv.sources = std::move(srcs);
+    return sv;
+}
+
+CLI11_NODISCARD CLI11_INLINE std::vector<SourcedValue> Option::get_sourced_results() const {
+    std::vector<SourcedValue> out;
+    const bool parsing = current_option_state_ == option_state::parsing;
+    const results_t &original = (parsing || proc_results_.empty()) ? results_ : proc_results_;
+    if(original.empty()) {
+        // No parsed results; fall back to the default value if one was set
+        if(!default_str_.empty()) {
+            ParseSource default_src;
+            default_src.type = SourceType::Default;
+            out.push_back(_make_sourced_value(default_str_, {default_src}));
+        }
+        return out;
+    }
+    if(current_option_state_ < option_state::reduced) {
+        if(parsing) {
+            // validators may modify a copy; sources stay aligned with results_
+            results_t res = results_;
+            _validate_results(res);
+            results_t extra;
+            std::vector<std::vector<std::size_t>> extra_srcs;
+            _reduce_results_with_sources(extra, extra_srcs, res, sources_);
+            const results_t &reduced = extra.empty() ? res : extra;
+            const auto &reduced_srcs = extra.empty() ? std::vector<std::vector<std::size_t>>{} : extra_srcs;
+            if(extra.empty()) {
+                // no reduction: every result maps to its own source
+                for(std::size_t ii = 0; ii < reduced.size(); ++ii) {
+                    std::vector<ParseSource> srcs;
+                    if(ii < sources_.size()) {
+                        srcs.push_back(sources_[ii]);
+                    }
+                    out.push_back(_make_sourced_value(reduced[ii], std::move(srcs)));
+                }
+            } else {
+                for(std::size_t ii = 0; ii < reduced.size(); ++ii) {
+                    std::vector<ParseSource> srcs;
+                    for(std::size_t idx : reduced_srcs[ii]) {
+                        if(idx < sources_.size()) {
+                            srcs.push_back(sources_[idx]);
+                        }
+                    }
+                    out.push_back(_make_sourced_value(reduced[ii], std::move(srcs)));
+                }
+            }
+        } else {
+            // already reduced: proc_results_ holds the reduced values, sources_ the originals
+            results_t extra;
+            std::vector<std::vector<std::size_t>> extra_srcs;
+            _reduce_results_with_sources(extra, extra_srcs, results_, sources_);
+            const results_t &reduced = extra.empty() ? results_ : extra;
+            for(std::size_t ii = 0; ii < reduced.size(); ++ii) {
+                std::vector<ParseSource> srcs;
+                if(extra.empty()) {
+                    if(ii < sources_.size()) {
+                        srcs.push_back(sources_[ii]);
+                    }
+                } else {
+                    for(std::size_t idx : extra_srcs[ii]) {
+                        if(idx < sources_.size()) {
+                            srcs.push_back(sources_[idx]);
+                        }
+                    }
+                }
+                out.push_back(_make_sourced_value(reduced[ii], std::move(srcs)));
+            }
+        }
+    } else {
+        // reduced: proc_results_ holds the reduced values; recompute source mapping from results_
+        results_t extra;
+        std::vector<std::vector<std::size_t>> extra_srcs;
+        _reduce_results_with_sources(extra, extra_srcs, results_, sources_);
+        const results_t &reduced = extra.empty() ? results_ : extra;
+        for(std::size_t ii = 0; ii < reduced.size(); ++ii) {
+            std::vector<ParseSource> srcs;
+            if(extra.empty()) {
+                if(ii < sources_.size()) {
+                    srcs.push_back(sources_[ii]);
+                }
+            } else {
+                for(std::size_t idx : extra_srcs[ii]) {
+                    if(idx < sources_.size()) {
+                        srcs.push_back(sources_[idx]);
+                    }
+                }
+            }
+            out.push_back(_make_sourced_value(reduced[ii], std::move(srcs)));
+        }
+    }
+    return out;
 }
 
 CLI11_INLINE Option *Option::type_size(int option_type_size) {
@@ -650,14 +776,24 @@ CLI11_INLINE void Option::_validate_results(results_t &res) const {
 }
 
 CLI11_INLINE void Option::_reduce_results(results_t &out, const results_t &original) const {
+    std::vector<std::vector<std::size_t>> dummy;
+    _reduce_results_with_sources(out, dummy, original, sources_);
+}
 
-    // max num items expected or length of vector, always at least 1
-    // Only valid for a trimming policy
+CLI11_INLINE void Option::_reduce_results_with_sources(results_t &out,
+                                                       std::vector<std::vector<std::size_t>> &out_sources,
+                                                       const results_t &original,
+                                                       const std::vector<ParseSource> &original_sources) const {
 
     out.clear();
+    out_sources.clear();
     // Operation depends on the policy setting
     switch(multi_option_policy_) {
     case MultiOptionPolicy::TakeAll:
+        out = original;
+        for(std::size_t ii = 0; ii < original.size(); ++ii) {
+            out_sources.push_back({ii});
+        }
         break;
     case MultiOptionPolicy::TakeLast: {
         // Allow multi-option sizes (including 0)
@@ -665,6 +801,14 @@ CLI11_INLINE void Option::_reduce_results(results_t &out, const results_t &origi
             static_cast<std::size_t>(std::max<int>(get_items_expected_max(), 1)), original.size());
         if(original.size() != trim_size) {
             out.assign(original.end() - static_cast<results_t::difference_type>(trim_size), original.end());
+            for(std::size_t ii = original.size() - trim_size; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
+        } else {
+            out = original;
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
         }
     } break;
     case MultiOptionPolicy::Reverse: {
@@ -673,23 +817,53 @@ CLI11_INLINE void Option::_reduce_results(results_t &out, const results_t &origi
             static_cast<std::size_t>(std::max<int>(get_items_expected_max(), 1)), original.size());
         if(original.size() != trim_size || trim_size > 1) {
             out.assign(original.end() - static_cast<results_t::difference_type>(trim_size), original.end());
+            for(std::size_t ii = original.size() - trim_size; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
+        } else {
+            out = original;
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
         }
         std::reverse(out.begin(), out.end());
+        std::reverse(out_sources.begin(), out_sources.end());
     } break;
     case MultiOptionPolicy::TakeFirst: {
         std::size_t trim_size = std::min<std::size_t>(
             static_cast<std::size_t>(std::max<int>(get_items_expected_max(), 1)), original.size());
         if(original.size() != trim_size) {
             out.assign(original.begin(), original.begin() + static_cast<results_t::difference_type>(trim_size));
+            for(std::size_t ii = 0; ii < trim_size; ++ii) {
+                out_sources.push_back({ii});
+            }
+        } else {
+            out = original;
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
         }
     } break;
     case MultiOptionPolicy::Join:
         if(original.size() > 1) {
             out.push_back(detail::join(original, std::string(1, (delimiter_ == '\0') ? '\n' : delimiter_)));
+            out_sources.emplace_back();
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.back().push_back(ii);
+            }
+        } else {
+            out = original;
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
+            }
         }
         break;
     case MultiOptionPolicy::Sum:
         out.push_back(detail::sum_string_vector(original));
+        out_sources.emplace_back();
+        for(std::size_t ii = 0; ii < original.size(); ++ii) {
+            out_sources.back().push_back(ii);
+        }
         break;
     case MultiOptionPolicy::Throw:
     default: {
@@ -706,11 +880,19 @@ CLI11_INLINE void Option::_reduce_results(results_t &out, const results_t &origi
         }
         if(original.size() > num_max) {
             if(original.size() == 2 && num_max == 1 && original[1] == "%%" && original[0] == "{}") {
-                // this condition is a trap for the following empty indicator check on config files, it may not be used
-                // anymore
+                // this condition is a trap for the following empty indicator check on config files, it may not be
+                // used anymore
                 out = original;  // LCOV_EXCL_LINE
+                for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                    out_sources.push_back({ii});
+                }
             } else {
                 throw ArgumentMismatch::AtMost(get_name(), static_cast<int>(num_max), original.size());
+            }
+        } else {
+            out = original;
+            for(std::size_t ii = 0; ii < original.size(); ++ii) {
+                out_sources.push_back({ii});
             }
         }
         break;
@@ -722,10 +904,14 @@ CLI11_INLINE void Option::_reduce_results(results_t &out, const results_t &origi
         if(original.size() == 1 && original[0] == "{}" && get_items_expected_min() > 0) {
             out.emplace_back("{}");
             out.emplace_back("%%");
+            out_sources.emplace_back();
+            out_sources.emplace_back();
         }
     } else if(out.size() == 1 && out[0] == "{}" && get_items_expected_min() > 0) {
         out.emplace_back("%%");
+        out_sources.emplace_back();
     }
+    (void)original_sources;
 }
 
 CLI11_INLINE std::string Option::_validate(std::string &result, int index) const {
@@ -750,7 +936,10 @@ CLI11_INLINE std::string Option::_validate(std::string &result, int index) const
     return err_msg;
 }
 
-CLI11_INLINE int Option::_add_result(std::string &&result, std::vector<std::string> &res) const {
+CLI11_INLINE int Option::_add_result(std::string &&result,
+                                     std::vector<std::string> &res,
+                                     std::vector<ParseSource> &srcs,
+                                     const ParseSource &src) const {
     int result_count = 0;
 
     // Handle the vector escape possibility all characters duplicated and starting with [[ ending with ]]
@@ -771,6 +960,7 @@ CLI11_INLINE int Option::_add_result(std::string &&result, std::vector<std::stri
         if(duplicated) {
             nstrs.push_back(']');
             res.push_back(std::move(nstrs));
+            srcs.push_back(src);
             ++result_count;
             return result_count;
         }
@@ -784,24 +974,27 @@ CLI11_INLINE int Option::_add_result(std::string &&result, std::vector<std::stri
         result.erase(result.begin());
         for(auto &var : CLI::detail::split_up(result, ',')) {
             if(!var.empty()) {
-                result_count += _add_result(std::move(var), res);
+                result_count += _add_result(std::move(var), res, srcs, src);
             }
         }
         return result_count;
     }
     if(delimiter_ == '\0') {
         res.push_back(std::move(result));
+        srcs.push_back(src);
         ++result_count;
     } else {
         if((result.find_first_of(delimiter_) != std::string::npos)) {
             for(const auto &var : CLI::detail::split(result, delimiter_)) {
                 if(!var.empty()) {
                     res.push_back(var);
+                    srcs.push_back(src);
                     ++result_count;
                 }
             }
         } else {
             res.push_back(std::move(result));
+            srcs.push_back(src);
             ++result_count;
         }
     }

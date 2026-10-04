@@ -673,10 +673,14 @@ template <class CharT> CLI11_INLINE void App::parse_char_t(int argc, const CharT
 
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc) - 1U);
-    for(auto i = static_cast<std::size_t>(argc) - 1U; i > 0U; --i)
+    std::vector<std::size_t> tokens;
+    tokens.reserve(static_cast<std::size_t>(argc) - 1U);
+    for(auto i = static_cast<std::size_t>(argc) - 1U; i > 0U; --i) {
         args.emplace_back(detail::maybe_narrow(argv[i]));
+        tokens.push_back(i);
+    }
 
-    parse(std::move(args));
+    _parse(std::move(args), tokens);
 }
 
 CLI11_INLINE void App::parse(std::string commandline, bool program_name_included) {
@@ -706,8 +710,14 @@ CLI11_INLINE void App::parse(std::string commandline, bool program_name_included
     } catch(const std::invalid_argument &arg) {
         throw CLI::ParseError(arg.what(), CLI::ExitCodes::InvalidError);
     }
+    std::vector<std::size_t> tokens;
+    tokens.reserve(args.size());
+    for(std::size_t ii = 0; ii < args.size(); ++ii) {
+        tokens.push_back(ii);
+    }
     std::reverse(args.begin(), args.end());
-    parse(std::move(args));
+    std::reverse(tokens.begin(), tokens.end());
+    _parse(std::move(args), tokens);
 }
 
 CLI11_INLINE void App::parse(std::wstring commandline, bool program_name_included) {
@@ -732,13 +742,23 @@ CLI11_INLINE void App::_parse_setup() {
 
 CLI11_INLINE void App::parse(std::vector<std::string> &args) {
     _parse_setup();
-    _parse(args);
+    std::vector<std::size_t> tokens;
+    tokens.reserve(args.size());
+    for(std::size_t ii = 0; ii < args.size(); ++ii) {
+        tokens.push_back(ii);
+    }
+    _parse(args, tokens);
     run_callback();
 }
 
 CLI11_INLINE void App::parse(std::vector<std::string> &&args) {
     _parse_setup();
-    _parse(std::move(args));
+    std::vector<std::size_t> tokens;
+    tokens.reserve(args.size());
+    for(std::size_t ii = 0; ii < args.size(); ++ii) {
+        tokens.push_back(ii);
+    }
+    _parse(std::move(args), tokens);
     run_callback();
 }
 
@@ -1376,7 +1396,7 @@ CLI11_INLINE bool App::_process_config_file(const std::string &config_file, bool
     if(path_result == detail::path_type::file) {
         try {
             std::vector<ConfigItem> values = config_formatter_->from_file(config_file);
-            _parse_config(values);
+            _parse_config(values, config_file);
             return true;
         } catch(const FileError &) {
             if(throw_error) {
@@ -1398,7 +1418,10 @@ CLI11_INLINE void App::_process_config_file() {
         if(!(file_given || config_ptr_->envname_.empty())) {
             std::string ename_string = detail::get_environment_value(config_ptr_->envname_);
             if(!ename_string.empty()) {
-                config_ptr_->add_result(ename_string);
+                ParseSource env_src;
+                env_src.type = SourceType::Environment;
+                env_src.env_name = config_ptr_->envname_;
+                config_ptr_->add_result(ename_string, env_src);
             }
         }
         config_ptr_->run_callback();
@@ -1429,13 +1452,22 @@ CLI11_INLINE void App::_process_config_file() {
 
 CLI11_INLINE void App::_process_env() {
     for(const Option_p &opt : options_) {
-        if(opt->count() == 0 && !opt->envname_.empty()) {
+        if(!opt->envname_.empty()) {
             std::string ename_string = detail::get_environment_value(opt->envname_);
             if(!ename_string.empty()) {
-                std::string result = ename_string;
-                result = opt->_validate(result, 0);
-                if(result.empty()) {
-                    opt->add_result(ename_string);
+                ParseSource env_src;
+                env_src.type = SourceType::Environment;
+                env_src.env_name = opt->envname_;
+                if(opt->count() == 0) {
+                    std::string result = ename_string;
+                    result = opt->_validate(result, 0);
+                    if(result.empty()) {
+                        opt->add_result(ename_string, env_src);
+                    }
+                } else {
+                    // the option already has a higher-priority value (CLI or config); record the env input as
+                    // overridden
+                    opt->add_overridden(ename_string, env_src);
                 }
             }
         }
@@ -1726,13 +1758,13 @@ CLI11_INLINE void App::_process_completion_callbacks(bool with_help_flags) {
     run_callback(false, with_help_flags);
 }
 
-CLI11_INLINE void App::_parse(std::vector<std::string> &args) {
+CLI11_INLINE void App::_parse(std::vector<std::string> &args, std::vector<std::size_t> &tokens) {
     increment_parsed();
     _trigger_pre_parse(args.size());
     bool positional_only = false;
 
     while(!args.empty()) {
-        if(!_parse_single(args, positional_only)) {
+        if(!_parse_single(args, tokens, positional_only)) {
             break;
         }
     }
@@ -1749,7 +1781,7 @@ CLI11_INLINE void App::_parse(std::vector<std::string> &args) {
     }
 }
 
-CLI11_INLINE void App::_parse(std::vector<std::string> &&args) {
+CLI11_INLINE void App::_parse(std::vector<std::string> &&args, std::vector<std::size_t> &tokens) {
     // this can only be called by the top level in which case parent == nullptr by definition
     // operation is simplified
     increment_parsed();
@@ -1757,7 +1789,7 @@ CLI11_INLINE void App::_parse(std::vector<std::string> &&args) {
     bool positional_only = false;
 
     while(!args.empty()) {
-        if(!_parse_single(args, positional_only)) {
+        if(!_parse_single(args, tokens, positional_only)) {
             break;  // LCOV_EXCL_LINE  _parse_single cannot return false at the top level
         }
     }
@@ -1769,7 +1801,7 @@ CLI11_INLINE void App::_parse(std::vector<std::string> &&args) {
 
 CLI11_INLINE void App::_parse_stream(std::istream &input) {
     auto values = config_formatter_->from_config(input);
-    _parse_config(values);
+    _parse_config(values, std::string{});
     increment_parsed();
     _trigger_pre_parse(values.size());
     _process();
@@ -1778,15 +1810,17 @@ CLI11_INLINE void App::_parse_stream(std::istream &input) {
     _process_extras();
 }
 
-CLI11_INLINE void App::_parse_config(const std::vector<ConfigItem> &args) {
+CLI11_INLINE void App::_parse_config(const std::vector<ConfigItem> &args, const std::string &config_file) {
     for(const ConfigItem &item : args) {
-        if(!_parse_single_config(item) && allow_config_extras_ == ConfigExtrasMode::Error)
+        if(!_parse_single_config(item, 0, config_file) && allow_config_extras_ == ConfigExtrasMode::Error)
             throw ConfigError::Extras(item.fullname());
     }
 }
 
-CLI11_INLINE bool
-App::_add_flag_like_result(Option *op, const ConfigItem &item, const std::vector<std::string> &inputs) {
+CLI11_INLINE bool App::_add_flag_like_result(Option *op,
+                                              const ConfigItem &item,
+                                              const std::vector<std::string> &inputs,
+                                              const ParseSource &src) {
     if(item.inputs.size() <= 1) {
         // Flag parsing
         auto res = config_formatter_->to_flag(item);
@@ -1806,7 +1840,7 @@ App::_add_flag_like_result(Option *op, const ConfigItem &item, const std::vector
             }
         }
 
-        op->add_result(res);
+        op->add_result(res, src);
         return true;
     }
     if(static_cast<int>(inputs.size()) > op->get_items_expected_max() &&
@@ -1837,7 +1871,7 @@ App::_add_flag_like_result(Option *op, const ConfigItem &item, const std::vector
             }
 
             if(valid_value) {
-                op->add_result(res);
+                op->add_result(res, src);
             } else {
                 throw InvalidError("invalid flag argument given");
             }
@@ -1847,11 +1881,12 @@ App::_add_flag_like_result(Option *op, const ConfigItem &item, const std::vector
     return false;
 }
 
-CLI11_INLINE bool App::_parse_single_config(const ConfigItem &item, std::size_t level) {
+CLI11_INLINE bool
+App::_parse_single_config(const ConfigItem &item, std::size_t level, const std::string &config_file) {
 
     if(level < item.parents.size()) {
         auto *subcom = get_subcommand_no_throw(item.parents.at(level));
-        return (subcom != nullptr) ? subcom->_parse_single_config(item, level + 1) : false;
+        return (subcom != nullptr) ? subcom->_parse_single_config(item, level + 1, config_file) : false;
     }
     // check for section open
     if(item.name == "++") {
@@ -1915,6 +1950,14 @@ CLI11_INLINE bool App::_parse_single_config(const ConfigItem &item, std::size_t 
         }
         throw ConfigError::NotConfigurable(item.fullname());
     }
+
+    // Build the source description for this config item
+    ParseSource cfg_src;
+    cfg_src.type = SourceType::ConfigFile;
+    cfg_src.config_file = config_file;
+    cfg_src.config_section = detail::join(item.parents, ".");
+    cfg_src.config_line = item.line;
+
     if(op->empty()) {
         std::vector<std::string> buffer;  // a buffer to use for copying and modifying inputs in a few cases
         bool useBuffer{false};
@@ -1927,23 +1970,30 @@ CLI11_INLINE bool App::_parse_single_config(const ConfigItem &item, std::size_t 
         }
         const std::vector<std::string> &inputs = (useBuffer) ? buffer : item.inputs;
         if(op->get_expected_min() == 0) {
-            if(_add_flag_like_result(op, item, inputs)) {
+            if(_add_flag_like_result(op, item, inputs, cfg_src)) {
                 return true;
             }
         }
-        op->add_result(inputs);
+        op->add_result(inputs, cfg_src);
         op->run_callback();
+    } else {
+        // The option already has a value from a higher-priority source (CLI or an earlier config file);
+        // record the config inputs as overridden.
+        op->add_overridden(item.inputs, cfg_src);
     }
 
     return true;
 }
 
-CLI11_INLINE bool App::_parse_single(std::vector<std::string> &args, bool &positional_only) {
+CLI11_INLINE bool App::_parse_single(std::vector<std::string> &args,
+                                      std::vector<std::size_t> &tokens,
+                                      bool &positional_only) {
     bool retval = true;
     detail::Classifier classifier = positional_only ? detail::Classifier::NONE : _recognize(args.back());
     switch(classifier) {
     case detail::Classifier::POSITIONAL_MARK:
         args.pop_back();
+        tokens.pop_back();
         positional_only = true;
         if(get_prefix_command()) {
             // don't care about extras mode here
@@ -1951,6 +2001,7 @@ CLI11_INLINE bool App::_parse_single(std::vector<std::string> &args, bool &posit
             while(!args.empty()) {
                 missing_.emplace_back(detail::Classifier::NONE, args.back());
                 args.pop_back();
+                tokens.pop_back();
             }
         } else if((!_has_remaining_positionals()) && (parent_ != nullptr)) {
             retval = false;
@@ -1961,20 +2012,21 @@ CLI11_INLINE bool App::_parse_single(std::vector<std::string> &args, bool &posit
     case detail::Classifier::SUBCOMMAND_TERMINATOR:
         // treat this like a positional mark if in the parent app
         args.pop_back();
+        tokens.pop_back();
         retval = false;
         break;
     case detail::Classifier::SUBCOMMAND:
-        retval = _parse_subcommand(args);
+        retval = _parse_subcommand(args, tokens);
         break;
     case detail::Classifier::LONG:
     case detail::Classifier::SHORT:
     case detail::Classifier::WINDOWS_STYLE:
         // If already parsed a subcommand, don't accept options_
-        retval = _parse_arg(args, classifier, false);
+        retval = _parse_arg(args, tokens, classifier, false);
         break;
     case detail::Classifier::NONE:
         // Probably a positional or something for a parent (sub)command
-        retval = _parse_positional(args, false);
+        retval = _parse_positional(args, tokens, false);
         if(retval && positionals_at_end_) {
             positional_only = true;
         }
@@ -2009,10 +2061,16 @@ CLI11_NODISCARD CLI11_INLINE bool App::_has_remaining_positionals() const {
     return false;
 }
 
-CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool haltOnSubcommand) {
+CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args,
+                                          std::vector<std::size_t> &tokens,
+                                          bool haltOnSubcommand) {
 
     const std::string &positional = args.back();
     Option *posOpt{nullptr};
+    ParseSource pos_src;
+    pos_src.type = SourceType::CommandLine;
+    pos_src.token_start = tokens.back();
+    pos_src.token_end = tokens.back();
 
     if(positionals_at_end_) {
         // deal with the case of required arguments at the end which should take precedence over other arguments
@@ -2057,7 +2115,7 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
         parse_order_.push_back(posOpt);
         if(posOpt->get_inject_separator()) {
             if(!posOpt->results().empty() && !posOpt->results().back().empty()) {
-                posOpt->add_result(std::string{});
+                posOpt->add_result(std::string{}, pos_src);
             }
         }
         results_t prev;
@@ -2070,9 +2128,9 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
             item.name = posOpt->pname_;
             item.inputs.push_back(positional);
             // input is singular guaranteed to return true in that case
-            _add_flag_like_result(posOpt, item, item.inputs);
+            _add_flag_like_result(posOpt, item, item.inputs, pos_src);
         } else {
-            posOpt->add_result(positional);
+            posOpt->add_result(positional, pos_src);
         }
 
         if(posOpt->get_trigger_on_parse()) {
@@ -2080,18 +2138,19 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
                 posOpt->run_callback();
             } else {
                 if(!prev.empty()) {
-                    posOpt->add_result(prev);
+                    posOpt->add_result(prev, pos_src);
                 }
             }
         }
 
         args.pop_back();
+        tokens.pop_back();
         return true;
     }
 
     for(auto &subc : subcommands_) {
         if((subc->name_.empty()) && (!subc->disabled_)) {
-            if(subc->_parse_positional(args, false)) {
+            if(subc->_parse_positional(args, tokens, false)) {
                 if(!subc->pre_parse_called_) {
                     subc->_trigger_pre_parse(args.size());
                 }
@@ -2101,7 +2160,8 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
     }
     // let the parent deal with it if possible
     if(parent_ != nullptr && fallthrough_) {
-        return _get_fallthrough_parent()->_parse_positional(args, static_cast<bool>(parse_complete_callback_));
+        return _get_fallthrough_parent()->_parse_positional(
+            args, tokens, static_cast<bool>(parse_complete_callback_));
     }
     /// Try to find a local subcommand that is repeated
     auto *com = _find_subcommand(args.back(), true, false);
@@ -2110,7 +2170,8 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
             return false;
         }
         args.pop_back();
-        com->_parse(args);
+        tokens.pop_back();
+        com->_parse(args, tokens);
         return true;
     }
     if(subcommand_fallthrough_) {
@@ -2134,10 +2195,12 @@ CLI11_INLINE bool App::_parse_positional(std::vector<std::string> &args, bool ha
     /// We are out of other options this goes to missing
     _move_to_missing(detail::Classifier::NONE, positional);
     args.pop_back();
+    tokens.pop_back();
     if(get_prefix_command()) {
         while(!args.empty()) {
             missing_.emplace_back(detail::Classifier::NONE, args.back());
             args.pop_back();
+            tokens.pop_back();
         }
     }
 
@@ -2181,9 +2244,9 @@ App::_find_subcommand(const std::string &subc_name, bool ignore_disabled, bool i
     return bcom;
 }
 
-CLI11_INLINE bool App::_parse_subcommand(std::vector<std::string> &args) {
+CLI11_INLINE bool App::_parse_subcommand(std::vector<std::string> &args, std::vector<std::size_t> &tokens) {
     if(_count_remaining_positionals(/* required */ true) > 0) {
-        _parse_positional(args, false);
+        _parse_positional(args, tokens, false);
         return true;
     }
     auto *com = _find_subcommand(args.back(), true, true);
@@ -2194,16 +2257,19 @@ CLI11_INLINE bool App::_parse_subcommand(std::vector<std::string> &args) {
             com = _find_subcommand(args.back().substr(0, dotloc), true, true);
             if(com != nullptr) {
                 args.back() = args.back().substr(dotloc + 1);
+                // the subcommand name is part of the same original token
+                tokens.push_back(tokens.back());
                 args.push_back(com->get_display_name());
             }
         }
     }
     if(com != nullptr) {
         args.pop_back();
+        tokens.pop_back();
         if(!com->silent_) {
             parsed_subcommands_.push_back(com);
         }
-        com->_parse(args);
+        com->_parse(args, tokens);
         auto *parent_app = com->parent_;
         while(parent_app != this) {
             parent_app->_trigger_pre_parse(args.size());
@@ -2220,10 +2286,17 @@ CLI11_INLINE bool App::_parse_subcommand(std::vector<std::string> &args) {
     return false;
 }
 
-CLI11_INLINE bool
-App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type, bool local_processing_only) {
+CLI11_INLINE bool App::_parse_arg(std::vector<std::string> &args,
+                                   std::vector<std::size_t> &tokens,
+                                   detail::Classifier current_type,
+                                   bool local_processing_only) {
 
     std::string current = args.back();
+    // the argv index of the option token currently being processed
+    std::size_t opt_token = tokens.back();
+    // the inclusive token range covered by this option occurrence
+    std::size_t range_start = opt_token;
+    std::size_t range_end = opt_token;
 
     std::string arg_name;
     std::string value;
@@ -2265,7 +2338,7 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
         // using while so we can break
         for(auto &subc : subcommands_) {
             if(subc->name_.empty() && !subc->disabled_) {
-                if(subc->_parse_arg(args, current_type, local_processing_only)) {
+                if(subc->_parse_arg(args, tokens, current_type, local_processing_only)) {
                     if(!subc->pre_parse_called_) {
                         subc->_trigger_pre_parse(args.size());
                     }
@@ -2308,27 +2381,31 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
                 std::string v = args.back();
                 auto saved_type = current_type;
                 args.pop_back();
+                tokens.pop_back();
                 arg_name = arg_name.substr(dotloc + 1);
                 // rebuild the argument from the already-split name/value so this works regardless of the
                 // original prefix style ('--', '-', or windows '/')
                 std::size_t pushed = 1;
                 if(arg_name.size() > 1) {
                     args.push_back("--" + arg_name + (value.empty() ? std::string{} : "=" + value));
+                    tokens.push_back(opt_token);
                     current_type = detail::Classifier::LONG;
                 } else {
                     if(!value.empty()) {
                         // '=' not allowed in short form arguments, so pass the value as a separate argument
                         args.push_back(value);
+                        tokens.push_back(opt_token);
                         ++pushed;
                     }
                     args.push_back(std::string{'-'} + arg_name);
+                    tokens.push_back(opt_token);
                     current_type = detail::Classifier::SHORT;
                 }
                 std::string dummy1, dummy2;
                 bool val = false;
                 if((current_type == detail::Classifier::SHORT && detail::valid_first_char(args.back()[1])) ||
                    detail::split_long(args.back(), dummy1, dummy2)) {
-                    val = sub->_parse_arg(args, current_type, true);
+                    val = sub->_parse_arg(args, tokens, current_type, true);
                 }
 
                 if(val) {
@@ -2348,8 +2425,10 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
                 // fallthrough to a parent re-splits the original argument with the correct splitter
                 for(std::size_t i = 0; i < pushed; ++i) {
                     args.pop_back();
+                    tokens.pop_back();
                 }
                 args.push_back(v);
+                tokens.push_back(opt_token);
                 current_type = saved_type;
             }
         }
@@ -2358,39 +2437,49 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
         }
         // If a subcommand, try the main command
         if(parent_ != nullptr && fallthrough_)
-            return _get_fallthrough_parent()->_parse_arg(args, current_type, false);
+            return _get_fallthrough_parent()->_parse_arg(args, tokens, current_type, false);
 
         // Otherwise, add to missing. In PositionalOnly mode an unrecognized option is left as an
         // extra and parsing continues so later registered options are still matched (#1374).
         args.pop_back();
+        tokens.pop_back();
         _move_to_missing(current_type, current);
         if(get_prefix_command_mode() == PrefixCommandMode::On) {
             while(!args.empty()) {
                 missing_.emplace_back(detail::Classifier::NONE, args.back());
                 args.pop_back();
+                tokens.pop_back();
             }
         } else if(allow_extras_ == ExtrasMode::AssumeSingleArgument) {
             if(!args.empty() && _recognize(args.back(), false) == detail::Classifier::NONE) {
                 _move_to_missing(detail::Classifier::NONE, args.back());
                 args.pop_back();
+                tokens.pop_back();
             }
         } else if(allow_extras_ == ExtrasMode::AssumeMultipleArguments) {
             while(!args.empty() && _recognize(args.back(), false) == detail::Classifier::NONE) {
                 _move_to_missing(detail::Classifier::NONE, args.back());
                 args.pop_back();
+                tokens.pop_back();
             }
         }
         return true;
     }
 
     args.pop_back();
+    tokens.pop_back();
 
     // Get a reference to the pointer to make syntax bearable
     Option_p &op = *op_ptr;
+    // source for this option occurrence
+    ParseSource cli_src;
+    cli_src.type = SourceType::CommandLine;
+    cli_src.token_start = range_start;
+    cli_src.token_end = range_end;
     /// if we require a separator add it here
     if(op->get_inject_separator()) {
         if(!op->results().empty() && !op->results().back().empty()) {
-            op->add_result(std::string{});
+            op->add_result(std::string{}, cli_src);
         }
     }
     if(op->get_trigger_on_parse() && op->current_option_state_ == Option::option_state::callback_run) {
@@ -2410,15 +2499,15 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
     // deal with purely flag like things
     if(max_num == 0) {
         auto res = op->get_flag_value(arg_name, value);
-        op->add_result(res);
+        op->add_result(res, cli_src);
         parse_order_.push_back(op.get());
     } else if(!value.empty()) {  // --this=value
-        op->add_result(value, result_count);
+        op->add_result(value, result_count, cli_src);
         parse_order_.push_back(op.get());
         collected += result_count;
         // -Trest
     } else if(!rest.empty()) {
-        op->add_result(rest, result_count);
+        op->add_result(rest, result_count, cli_src);
         parse_order_.push_back(op.get());
         rest = "";
         collected += result_count;
@@ -2428,7 +2517,10 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
     while(min_num > collected && !args.empty()) {
         std::string current_ = args.back();
         args.pop_back();
-        op->add_result(current_, result_count);
+        range_end = std::max(range_end, tokens.back());
+        tokens.pop_back();
+        cli_src.token_end = range_end;
+        op->add_result(current_, result_count, cli_src);
         parse_order_.push_back(op.get());
         collected += result_count;
     }
@@ -2454,26 +2546,31 @@ App::_parse_arg(std::vector<std::string> &args, detail::Classifier current_type,
                     break;
                 }
             }
-            op->add_result(args.back(), result_count);
+            op->add_result(args.back(), result_count, cli_src);
             parse_order_.push_back(op.get());
             args.pop_back();
+            range_end = std::max(range_end, tokens.back());
+            tokens.pop_back();
+            cli_src.token_end = range_end;
             collected += result_count;
         }
 
         // Allow -- to end an unlimited list and "eat" it
-        if(!args.empty() && _recognize(args.back()) == detail::Classifier::POSITIONAL_MARK)
+        if(!args.empty() && _recognize(args.back()) == detail::Classifier::POSITIONAL_MARK) {
             args.pop_back();
+            tokens.pop_back();
+        }
         // optional flag that didn't receive anything now get the default value
         if(min_num == 0 && max_num > 0 && collected == 0) {
             auto res = op->get_flag_value(arg_name, std::string{});
-            op->add_result(res);
+            op->add_result(res, cli_src);
             parse_order_.push_back(op.get());
         }
     }
     // if we only partially completed a type then add an empty string if allowed for later processing
     if(min_num > 0 && (collected % op->get_type_size_max()) != 0) {
         if(op->get_type_size_max() != op->get_type_size_min()) {
-            op->add_result(std::string{});
+            op->add_result(std::string{}, cli_src);
         } else {
             throw ArgumentMismatch::PartialType(op->get_name(), op->get_type_size_min(), op->get_type_name());
         }

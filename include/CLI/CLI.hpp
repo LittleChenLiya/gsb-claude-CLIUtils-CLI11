@@ -21,6 +21,8 @@
 
 #include "StringTools.hpp"
 
+#include "ParseSource.hpp"
+
 #include "Error.hpp"
 
 #include "TypeTools.hpp"

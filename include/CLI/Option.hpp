@@ -23,6 +23,7 @@
 
 #include "Error.hpp"
 #include "Macros.hpp"
+#include "ParseSource.hpp"
 #include "Split.hpp"
 #include "StringTools.hpp"
 #include "Validators.hpp"
@@ -101,6 +102,9 @@ template <typename CRTP> class OptionBase {
     /// Priority of callback
     CallbackPriority callback_priority_{CallbackPriority::Normal};
 
+    /// Mark the option as sensitive: source records keep the location but never the value
+    bool sensitive_{false};
+
     /// Copy the contents to another similar class (one based on OptionBase)
     template <typename T> void copy_to(T *other) const;
 
@@ -162,6 +166,9 @@ template <typename CRTP> class OptionBase {
     /// The priority of callback
     CLI11_NODISCARD CallbackPriority get_callback_priority() const { return callback_priority_; }
 
+    /// True if the option is marked sensitive
+    CLI11_NODISCARD bool get_sensitive() const { return sensitive_; }
+
     // Shortcuts for multi option policy
 
     /// Set the multi option policy to take last
@@ -203,6 +210,12 @@ template <typename CRTP> class OptionBase {
     /// Allow in a configuration file
     CRTP *configurable(bool value = true) {
         configurable_ = value;
+        return static_cast<CRTP *>(this);
+    }
+
+    /// Mark the option as sensitive: source records keep the location but never the value
+    CRTP *sensitive(bool value = true) {
+        sensitive_ = value;
         return static_cast<CRTP *>(this);
     }
 
@@ -348,6 +361,10 @@ class Option : public OptionBase<Option> {
     results_t results_{};
     /// results after reduction
     mutable results_t proc_results_{};
+    /// parse sources aligned with @ref results_
+    std::vector<ParseSource> sources_{};
+    /// inputs that were overridden by a higher-priority source
+    std::vector<SourcedValue> overridden_{};
     /// enumeration for the option state machine
     enum class option_state : char {
         parsing = 0,       //!< The option is currently collecting parsed results
@@ -687,17 +704,52 @@ class Option : public OptionBase<Option> {
     /// Puts a result at the end
     Option *add_result(std::string s);
 
+    /// Puts a result at the end, recording where it came from
+    Option *add_result(std::string s, const ParseSource &src);
+
     /// Puts a result at the end and get a count of the number of arguments actually added
     Option *add_result(std::string s, int &results_added);
 
+    /// Puts a result at the end and get a count of the number of arguments actually added, recording where it came
+    /// from
+    Option *add_result(std::string s, int &results_added, const ParseSource &src);
+
     /// Puts a result at the end
     Option *add_result(std::vector<std::string> s);
+
+    /// Puts a result at the end, recording where it came from
+    Option *add_result(std::vector<std::string> s, const ParseSource &src);
 
     /// Get the current complete results set
     CLI11_NODISCARD const results_t &results() const { return results_; }
 
     /// Get a copy of the results
     CLI11_NODISCARD results_t reduced_results() const;
+
+    /// Get the retained values together with the source(s) that produced them.
+    ///
+    /// The returned vector mirrors @ref reduced_results(): one entry per retained value, each with the source (or
+    /// merged sources) it came from. For sensitive options the values are redacted.
+    CLI11_NODISCARD std::vector<SourcedValue> get_sourced_results() const;
+
+    /// Get the inputs that were overridden by a higher-priority source.
+    ///
+    /// Each entry carries the rejected value and the source that would have supplied it. Sensitive options only
+    /// record the source, not the value.
+    CLI11_NODISCARD const std::vector<SourcedValue> &get_overridden() const { return overridden_; }
+
+    /// Record an input that was overridden by a higher-priority source
+    void add_overridden(std::string value, const ParseSource &src) {
+        std::vector<ParseSource> srcs{src};
+        overridden_.push_back(_make_sourced_value(std::move(value), std::move(srcs)));
+    }
+
+    /// Record a group of inputs that were overridden by a higher-priority source
+    void add_overridden(const std::vector<std::string> &values, const ParseSource &src) {
+        for(const auto &value : values) {
+            add_overridden(value, src);
+        }
+    }
 
     /// Get the results as a specified type
     template <typename T> void results(T &output) const {
@@ -715,10 +767,11 @@ class Option : public OptionBase<Option> {
 
         } else {
             results_t res;
+            std::vector<ParseSource> res_srcs;
             if(results_.empty()) {
                 if(!default_str_.empty()) {
                     // _add_results takes an rvalue only
-                    _add_result(std::string(default_str_), res);
+                    _add_result(std::string(default_str_), res, res_srcs, ParseSource{});
                     _validate_results(res);
                     results_t extra;
                     _reduce_results(extra, res);
@@ -833,11 +886,29 @@ class Option : public OptionBase<Option> {
     */
     void _reduce_results(results_t &out, const results_t &original) const;
 
+    /** reduce the results in accordance with the MultiOptionPolicy, also producing the source indices
+     *
+     * @param[out] out reduced results
+     * @param[out] out_sources for each reduced result, the list of source indices (into @a original) that produced it
+     * @param original the full set of collected results
+     * @param original_sources the sources aligned with @a original
+     */
+    void _reduce_results_with_sources(results_t &out,
+                                      std::vector<std::vector<std::size_t>> &out_sources,
+                                      const results_t &original,
+                                      const std::vector<ParseSource> &original_sources) const;
+
     // Run a result through the Validators
     std::string _validate(std::string &result, int index) const;
 
-    /// Add a single result to the result set, taking into account delimiters
-    int _add_result(std::string &&result, std::vector<std::string> &res) const;
+    /// Add a single result to the result set, taking into account delimiters; also records the source
+    int _add_result(std::string &&result,
+                    std::vector<std::string> &res,
+                    std::vector<ParseSource> &srcs,
+                    const ParseSource &src) const;
+
+    /// Build a SourcedValue from a value and its sources, redacting for sensitive options
+    SourcedValue _make_sourced_value(std::string value, std::vector<ParseSource> srcs) const;
 };
 
 // [CLI11:option_hpp:end]
